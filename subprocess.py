@@ -152,8 +152,9 @@ class TimeoutExpired(SubprocessError):
         self.stderr = stderr
 
     def __str__(self):
-        return ("Command '%s' timed out after %s seconds" %
-                (self.cmd, self.timeout))
+        return (("Command '%s' timed out after %s seconds\n"
+                "stdout: %s\nstderr:%s")%
+                (self.cmd, self.timeout, self.stdout, self.stderr))
 
     @property
     def stdout(self):
@@ -164,6 +165,9 @@ class TimeoutExpired(SubprocessError):
         # There's no obvious reason to set this, but allow it anyway so
         # .stdout is a transparent alias for .output
         self.output = value
+
+
+class LogTimeoutExpired(TimeoutExpired): pass
 
 
 if _mswindows:
@@ -370,7 +374,7 @@ def check_call(*popenargs, **kwargs):
     return 0
 
 
-def check_output(*popenargs, timeout=None, **kwargs):
+def check_output(*popenargs, timeout=None, log_timeout=None, **kwargs):
     r"""Run command with arguments and return its output.
 
     If the exit code was non-zero it raises a CalledProcessError.  The
@@ -418,7 +422,7 @@ def check_output(*popenargs, timeout=None, **kwargs):
         kwargs['input'] = empty
 
     return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
-               **kwargs).stdout
+               log_timeout=log_timeout, **kwargs).stdout
 
 
 class CompletedProcess(object):
@@ -458,7 +462,8 @@ class CompletedProcess(object):
 
 
 def run(*popenargs,
-        input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        input=None, capture_output=False, timeout=None, check=False,
+        log_timeout=None, **kwargs):
     """Run command with arguments and return a CompletedProcess instance.
 
     The returned instance will have attributes args, returncode, stdout and
@@ -472,6 +477,9 @@ def run(*popenargs,
 
     If timeout is given, and the process takes too long, a TimeoutExpired
     exception will be raised.
+
+    If log_timeout is given, and the process has not output for a period, a
+    TimeoutExpired exception will be raised.
 
     There is an optional argument "input", allowing you to
     pass bytes or a string to the subprocess's stdin.  If you use this argument
@@ -491,6 +499,9 @@ def run(*popenargs,
             raise ValueError('stdin and input arguments may not both be used.')
         kwargs['stdin'] = PIPE
 
+    if log_timeout:
+        capture_output = True
+
     if capture_output:
         if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
             raise ValueError('stdout and stderr arguments may not be used '
@@ -500,8 +511,10 @@ def run(*popenargs,
 
     with Popen(*popenargs, **kwargs) as process:
         try:
-            stdout, stderr = process.communicate(input, timeout=timeout)
-        except TimeoutExpired as exc:
+            stdout, stderr = process.communicate(input=input,
+                                                 timeout=timeout,
+                                                 log_timeout=log_timeout)
+        except (TimeoutExpired, LogTimeoutExpired) as exc:
             process.kill()
             if _mswindows:
                 # Windows accumulates the output in a single blocking
@@ -1022,9 +1035,14 @@ class Popen:
     def universal_newlines(self, universal_newlines):
         self.text_mode = bool(universal_newlines)
 
-    def _translate_newlines(self, data, encoding, errors):
-        data = data.decode(encoding, errors)
-        return data.replace("\r\n", "\n").replace("\r", "\n")
+    def _may_translate(self, data):
+        if data is not None:
+            if type(data) is list:
+                data = b''.join(data)
+            if self.text_mode:
+                data = data.decode(self.encoding, self.errors)
+                data = data.replace("\r\n", "\n").replace("\r", "\n")
+        return data
 
     def __enter__(self):
         return self
@@ -1102,7 +1120,7 @@ class Popen:
             else:
                 raise
 
-    def communicate(self, input=None, timeout=None):
+    def communicate(self, input=None, timeout=None, log_timeout=None):
         """Interact with process: Send data to stdin and close it.
         Read data from stdout and stderr, until end-of-file is
         reached.  Wait for process to terminate.
@@ -1126,8 +1144,9 @@ class Popen:
         # Optimization: If we are not worried about timeouts, we haven't
         # started communicating, and we have one or zero pipes, using select()
         # or threads is unnecessary.
-        if (timeout is None and not self._communication_started and
-            [self.stdin, self.stdout, self.stderr].count(None) >= 2):
+        if (    timeout is None and log_timeout is None
+            and not self._communication_started
+            and [self.stdin, self.stdout, self.stderr].count(None) >= 2):
             stdout = None
             stderr = None
             if self.stdin:
@@ -1141,18 +1160,19 @@ class Popen:
             self.wait()
         else:
             if timeout is not None:
-                endtime = _time() + timeout
+                proc_endtime = _time() + timeout
             else:
-                endtime = None
+                proc_endtime = None
 
             try:
-                stdout, stderr = self._communicate(input, endtime, timeout)
+                stdout, stderr = self._communicate(input, proc_endtime,
+                                                   timeout, log_timeout)
             except KeyboardInterrupt:
                 # https://bugs.python.org/issue25942
                 # See the detailed comment in .wait().
                 if timeout is not None:
                     sigint_timeout = min(self._sigint_wait_secs,
-                                         self._remaining_time(endtime))
+                                         self._remaining_time(proc_endtime))
                 else:
                     sigint_timeout = self._sigint_wait_secs
                 self._sigint_wait_secs = 0  # nothing else should wait.
@@ -1165,7 +1185,7 @@ class Popen:
             finally:
                 self._communication_started = True
 
-            sts = self.wait(timeout=self._remaining_time(endtime))
+            sts = self.wait(timeout=self._remaining_time(proc_endtime))
 
         return (stdout, stderr)
 
@@ -1192,16 +1212,27 @@ class Popen:
         if skip_check_and_raise or _time() > endtime:
             raise TimeoutExpired(
                     self.args, orig_timeout,
-                    output=b''.join(stdout_seq) if stdout_seq else None,
-                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+                    output=self._may_translate(stdout_seq),
+                    stderr=self._may_translate(stderr_seq))
 
+    def _check_log_timeout(self, got_output, log_endtime,
+                           log_timeout, stdout_seq, stderr_seq):
+        """Convenience for checking if a timeout has expired."""
+        if log_endtime is None:
+            return
+        if not got_output and _time() > log_endtime:
+            raise LogTimeoutExpired(
+                    self.args, log_timeout,
+                    output=self._may_translate(stdout_seq),
+                    stderr=self._may_translate(stderr_seq))
 
-    def wait(self, timeout=None):
+    def wait(self, timeout=None, stdout_seq=None, stderr_seq=None):
         """Wait for child process to terminate; returns self.returncode."""
         if timeout is not None:
             endtime = _time() + timeout
         try:
-            return self._wait(timeout=timeout)
+            return self._wait(timeout=timeout, stdout_seq=stdout_seq,
+                              stderr_seq=stderr_seq)
         except KeyboardInterrupt:
             # https://bugs.python.org/issue25942
             # The first keyboard interrupt waits briefly for the child to
@@ -1214,7 +1245,8 @@ class Popen:
                 sigint_timeout = self._sigint_wait_secs
             self._sigint_wait_secs = 0  # nothing else should wait.
             try:
-                self._wait(timeout=sigint_timeout)
+                self._wait(timeout=sigint_timeout, stdout_seq=stdout_seq,
+                           stderr_seq=stderr_seq)
             except TimeoutExpired:
                 pass
             raise  # resume the KeyboardInterrupt
@@ -1247,6 +1279,20 @@ class Popen:
 
         # Prevent a double close of these handles/fds from __init__ on error.
         self._closed_child_pipe_fds = True
+
+
+    # to calculate endtime for one iteration, given the process timeout
+    # or log timeout value may be None
+    def _get_endtime(self, proc_endtime, log_timeout):
+        endtime = proc_endtime
+        if log_timeout is not None:
+            log_endtime = _time() + log_timeout
+            if endtime is not None:
+                if endtime > log_timeout:
+                    endtime = log_endtime
+            else:
+                endtime = log_endtime
+        return endtime
 
     if _mswindows:
         #
@@ -1474,7 +1520,7 @@ class Popen:
             return self.returncode
 
 
-        def _wait(self, timeout):
+        def _wait(self, timeout, stdout_seq=None, stderr_seq=None):
             """Internal implementation of wait() on Windows."""
             if timeout is None:
                 timeout_millis = _winapi.INFINITE
@@ -1485,31 +1531,39 @@ class Popen:
                 result = _winapi.WaitForSingleObject(self._handle,
                                                      timeout_millis)
                 if result == _winapi.WAIT_TIMEOUT:
-                    raise TimeoutExpired(self.args, timeout)
+                    raise TimeoutExpired(self.args, timeout,
+                                         output=self._may_translate(stdout_seq),
+                                         stderr=self._may_translate(stderr_seq))
                 self.returncode = _winapi.GetExitCodeProcess(self._handle)
             return self.returncode
 
 
         def _readerthread(self, fh, buffer):
-            buffer.append(fh.read())
-            fh.close()
+            while True:
+                data = os.read(fh.fileno(), 32768)
+                if len(data):
+                    buffer.append(data)
+                else:
+                    fh.close()
+                    return
+                time.sleep(0.1)
 
 
-        def _communicate(self, input, endtime, orig_timeout):
+        def _communicate(self, input, proc_endtime, orig_timeout, log_timeout):
             # Start reader threads feeding into a list hanging off of this
             # object, unless they've already been started.
-            if self.stdout and not hasattr(self, "_stdout_buff"):
-                self._stdout_buff = []
+            self._stdout_buff = []
+            self._stderr_buff = []
+            if self.stdout and not hasattr(self, "stdout_thread"):
                 self.stdout_thread = \
                         threading.Thread(target=self._readerthread,
-                                         args=(self.stdout, self._stdout_buff))
+                                args=(self.stdout, self._stdout_buff))
                 self.stdout_thread.daemon = True
                 self.stdout_thread.start()
-            if self.stderr and not hasattr(self, "_stderr_buff"):
-                self._stderr_buff = []
+            if self.stderr and not hasattr(self, "stderr_thread"):
                 self.stderr_thread = \
                         threading.Thread(target=self._readerthread,
-                                         args=(self.stderr, self._stderr_buff))
+                                args=(self.stderr, self._stderr_buff))
                 self.stderr_thread.daemon = True
                 self.stderr_thread.start()
 
@@ -1519,29 +1573,39 @@ class Popen:
             # Wait for the reader threads, or time out.  If we time out, the
             # threads remain reading and the fds left open in case the user
             # calls communicate again.
-            if self.stdout is not None:
-                self.stdout_thread.join(self._remaining_time(endtime))
-                if self.stdout_thread.is_alive():
-                    raise TimeoutExpired(self.args, orig_timeout)
-            if self.stderr is not None:
-                self.stderr_thread.join(self._remaining_time(endtime))
-                if self.stderr_thread.is_alive():
-                    raise TimeoutExpired(self.args, orig_timeout)
+            log_cnt = 0
+            while (  self.stdout is not None and self.stdout_thread.is_alive()
+                  or self.stderr is not None and self.stderr_thread.is_alive()):
+                self._check_timeout(proc_endtime, orig_timeout,
+                                    self._stderr_buff, self._stdout_buff)
+                endtime = self._get_endtime(proc_endtime, log_timeout)
+
+                if self.stdout is not None:
+                    self.stdout_thread.join(self._remaining_time(endtime))
+
+                if self.stderr is not None:
+                    self.stderr_thread.join(self._remaining_time(endtime))
+
+                if endtime is not None:
+                    new_log_cnt = len(self._stdout_buff) + len(self._stderr_buff)
+                    if (     new_log_cnt == log_cnt
+                        and  (   self.stdout_thread.is_alive()
+                            or self.stderr_thread.is_alive())):
+                            raise LogTimeoutExpired(self.args, orig_timeout,
+                                        self._may_translate(self._stdout_buff),
+                                        self._may_translate(self._stderr_buff))
+
 
             # Collect the output from and close both pipes, now that we know
             # both have been read successfully.
             stdout = None
             stderr = None
             if self.stdout:
-                stdout = self._stdout_buff
+                stdout = self._may_translate(self._stdout_buff)
                 self.stdout.close()
             if self.stderr:
-                stderr = self._stderr_buff
+                stderr = self._may_translate(self._stderr_buff)
                 self.stderr.close()
-
-            # All data exchanged.  Translate lists into strings.
-            stdout = stdout[0] if stdout else None
-            stderr = stderr[0] if stderr else None
 
             return (stdout, stderr)
 
@@ -1903,7 +1967,7 @@ class Popen:
             return (pid, sts)
 
 
-        def _wait(self, timeout):
+        def _wait(self, timeout, stdout_seq=None, stderr_seq=None):
             """Internal implementation of wait() on POSIX."""
             if self.returncode is not None:
                 return self.returncode
@@ -1927,7 +1991,10 @@ class Popen:
                             self._waitpid_lock.release()
                     remaining = self._remaining_time(endtime)
                     if remaining <= 0:
-                        raise TimeoutExpired(self.args, timeout)
+                        raise TimeoutExpired(
+                            self.args, timeout,
+                            output=self._may_translate(stdout_seq),
+                            stderr=self._may_translate(stderr_seq))
                     delay = min(delay * 2, remaining, .05)
                     time.sleep(delay)
             else:
@@ -1944,7 +2011,7 @@ class Popen:
             return self.returncode
 
 
-        def _communicate(self, input, endtime, orig_timeout):
+        def _communicate(self, input, proc_endtime, orig_timeout, log_timeout):
             if self.stdin and not self._communication_started:
                 # Flush stdio buffer.  This might block, if the user has
                 # been writing to .stdin in an uncontrolled fashion.
@@ -1979,6 +2046,7 @@ class Popen:
             if self._input:
                 input_view = memoryview(self._input)
 
+            got_output = False
             with _PopenSelector() as selector:
                 if self.stdin and input:
                     selector.register(self.stdin, selectors.EVENT_WRITE)
@@ -1988,22 +2056,22 @@ class Popen:
                     selector.register(self.stderr, selectors.EVENT_READ)
 
                 while selector.get_map():
-                    timeout = self._remaining_time(endtime)
-                    if timeout is not None and timeout < 0:
-                        self._check_timeout(endtime, orig_timeout,
-                                            stdout, stderr,
-                                            skip_check_and_raise=True)
-                        raise RuntimeError(  # Impossible :)
-                            '_check_timeout(..., skip_check_and_raise=True) '
-                            'failed to raise TimeoutExpired.')
+                    got_output = False
 
+                    log_endtime = self._get_endtime(proc_endtime, log_timeout)
+
+                    timeout = self._remaining_time(log_endtime)
                     ready = selector.select(timeout)
-                    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+
+                    # only check proc timeout, as at this time, we 
+                    # don't know if there is log
+                    self._check_timeout(proc_endtime, orig_timeout, stdout,
+                                        stderr)
 
                     # XXX Rewrite these to use non-blocking I/O on the file
                     # objects; they are no longer using C stdio!
 
-                    for key, events in ready:
+                    for key, _ in ready:
                         if key.fileobj is self.stdin:
                             chunk = input_view[self._input_offset :
                                                self._input_offset + _PIPE_BUF]
@@ -2019,29 +2087,32 @@ class Popen:
                         elif key.fileobj in (self.stdout, self.stderr):
                             data = os.read(key.fd, 32768)
                             if not data:
+                                print(f"{_time()} no data for {key.fileobj}")
                                 selector.unregister(key.fileobj)
                                 key.fileobj.close()
-                            self._fileobj2output[key.fileobj].append(data)
+                            else:
+                                self._fileobj2output[key.fileobj].append(data)
+                                print(f"{_time()} got data for {key.fileobj}: {data}")
+                                got_output = True
+                    if proc_endtime is not None and proc_endtime == log_endtime:
+                        self._check_timeout(proc_endtime, orig_timeout, stdout,
+                                            stderr)
+                    elif log_endtime is not None:
+                        self._check_log_timeout(got_output, log_endtime,
+                                                log_timeout, stdout, stderr)
 
-            self.wait(timeout=self._remaining_time(endtime))
+            # at this point, all output should have closed, reset log_endtime
+            log_endtime = self._get_endtime(proc_endtime, log_timeout)
+
+            # and take it as no output, wait for min(log_timeout, timeout)
+            self.wait(timeout=self._remaining_time(log_endtime),
+                      stdout_seq=stdout, stderr_seq=stderr)
 
             # All data exchanged.  Translate lists into strings.
-            if stdout is not None:
-                stdout = b''.join(stdout)
-            if stderr is not None:
-                stderr = b''.join(stderr)
-
             # Translate newlines, if requested.
             # This also turns bytes into strings.
-            if self.text_mode:
-                if stdout is not None:
-                    stdout = self._translate_newlines(stdout,
-                                                      self.stdout.encoding,
-                                                      self.stdout.errors)
-                if stderr is not None:
-                    stderr = self._translate_newlines(stderr,
-                                                      self.stderr.encoding,
-                                                      self.stderr.errors)
+            stdout = self._may_translate(stdout)
+            stderr = self._may_translate(stderr)
 
             return (stdout, stderr)
 
