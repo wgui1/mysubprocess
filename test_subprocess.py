@@ -9,7 +9,7 @@ shellcmd = os.path.join(module_dir, 'shellcmd_test.py')
 class TestLogTimeoutOnly:
     def test_logtimeout_only(self):
         with pytest.raises(subprocess.LogTimeoutExpired) as ex:
-            subprocess.run([sys.executable, shellcmd], log_timeout=0.9)
+            subprocess.run([sys.executable, shellcmd, '-s', '3'], log_timeout=2)
         assert ex.value.stdout == b'0 line\n'
         assert ex.value.stderr == b''
         assert ex.typename == 'LogTimeoutExpired'

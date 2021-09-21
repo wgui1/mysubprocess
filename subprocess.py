@@ -152,9 +152,8 @@ class TimeoutExpired(SubprocessError):
         self.stderr = stderr
 
     def __str__(self):
-        return (("Command '%s' timed out after %s seconds\n"
-                "stdout: %s\nstderr:%s")%
-                (self.cmd, self.timeout, self.stdout, self.stderr))
+        return ("Command '%s' timed out after %s seconds" %
+                (self.cmd, self.timeout))
 
     @property
     def stdout(self):
@@ -1538,7 +1537,7 @@ class Popen:
             return self.returncode
 
 
-        def _readerthread(self, fh, buffer):
+        def _readerthread(self, fh, buffer, endtime):
             while True:
                 data = os.read(fh.fileno(), 32768)
                 if len(data):
@@ -1546,7 +1545,10 @@ class Popen:
                 else:
                     fh.close()
                     return
-                time.sleep(0.1)
+                sleeptime = 0.1
+                if endtime is not None:
+                    sleeptime = min(self._remaining_time(endtime), sleeptime)
+                time.sleep(sleeptime)
 
 
         def _communicate(self, input, proc_endtime, orig_timeout, log_timeout):
@@ -1554,16 +1556,16 @@ class Popen:
             # object, unless they've already been started.
             self._stdout_buff = []
             self._stderr_buff = []
-            if self.stdout and not hasattr(self, "stdout_thread"):
+            if self.stdout and not hasattr(self, "_stdout_buff"):
                 self.stdout_thread = \
                         threading.Thread(target=self._readerthread,
-                                args=(self.stdout, self._stdout_buff))
+                                         args=(self.stdout, self._stdout_buff))
                 self.stdout_thread.daemon = True
                 self.stdout_thread.start()
-            if self.stderr and not hasattr(self, "stderr_thread"):
+            if self.stderr and not hasattr(self, "_stderr_buff"):
                 self.stderr_thread = \
                         threading.Thread(target=self._readerthread,
-                                args=(self.stderr, self._stderr_buff))
+                                         args=(self.stderr, self._stderr_buff))
                 self.stderr_thread.daemon = True
                 self.stderr_thread.start()
 
@@ -1573,7 +1575,8 @@ class Popen:
             # Wait for the reader threads, or time out.  If we time out, the
             # threads remain reading and the fds left open in case the user
             # calls communicate again.
-            log_cnt = 0
+            stdout_cnt = 0
+            stderr_cnt = 0
             while (  self.stdout is not None and self.stdout_thread.is_alive()
                   or self.stderr is not None and self.stderr_thread.is_alive()):
                 self._check_timeout(proc_endtime, orig_timeout,
@@ -1582,19 +1585,21 @@ class Popen:
 
                 if self.stdout is not None:
                     self.stdout_thread.join(self._remaining_time(endtime))
-
+                    if (    self.stdout_thread.is_alive()
+                        and len(self._stdout_buff) == stdout_cnt):
+                            raise TimeoutExpired(self.args, orig_timeout,
+                                        self._may_translate(self._stderr_buff),
+                                        self._may_translate(self._stderr_buff))
                 if self.stderr is not None:
                     self.stderr_thread.join(self._remaining_time(endtime))
-
-                if endtime is not None:
-                    new_log_cnt = len(self._stdout_buff) + len(self._stderr_buff)
-                    if (     new_log_cnt == log_cnt
-                        and  (   self.stdout_thread.is_alive()
-                            or self.stderr_thread.is_alive())):
-                            raise LogTimeoutExpired(self.args, orig_timeout,
-                                        self._may_translate(self._stdout_buff),
+                    if (    self.stderr_thread.is_alive()
+                        and len(self._stderr_buff) == stderr_cnt):
+                        raise TimeoutExpired(self.args, orig_timeout,
+                                        self._may_translate(self._stderr_buff),
                                         self._may_translate(self._stderr_buff))
 
+                stdout_cnt = len(self._stdout_buff)
+                stderr_cnt = len(self._stderr_buff)
 
             # Collect the output from and close both pipes, now that we know
             # both have been read successfully.
