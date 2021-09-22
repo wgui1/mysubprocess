@@ -5,13 +5,6 @@ import time
 import click
 import logging
 
-logging.basicConfig(encoding='utf-8',
-                    level=logging.DEBUG,
-                    format='%(asctime)s %(message)s',
-                    datefmt='%m/%d/%Y %I:%M:%S %p')
-log = logging.info
-log = print
-
 @click.command()
 @click.option('-c', '--count', default=1, type=int,
               help='count of print a log and a sleep')
@@ -19,13 +12,17 @@ log = print
               help='sleep time in one interation')
 @click.option('-l', '--last-sleep', default=0, type=float,
               help='last sleep time')
-def main(count, sleep, last_sleep):
+@click.option('-e', '--with-stderr', default=False, type=bool,
+              help='whether to print to stderr')
+def main(count, sleep, last_sleep, with_stderr):
     for i in range(count):
-        log(f"{i} line")
+        output = sys.stderr if with_stderr and (i % 2) else sys.stdout
+        print(f"{i} line", file=output)
         sys.stdout.flush()
+        sys.stderr.flush()
         time.sleep(sleep)
     if last_sleep:
-        log("last line")
+        print(f"last line", file=sys.stdout)
         sys.stdout.flush()
         time.sleep(last_sleep)
 

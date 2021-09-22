@@ -167,3 +167,14 @@ class TestNoTimeout:
         assert rc.returncode == 0
         assert stripr(rc.stdout) == '0 line\n1 line\n2 line\n'
         assert stripr(rc.stderr) == ''
+
+class TestWithStderr:
+    def test_with_stderr(self):
+        rc = subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '1.5', '-e', 'yes'])
+        assert rc.returncode == 0
+
+        rc = subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '1.5', '-e', 'yes'],
+                capture_output=True, text=True, encoding='utf-8', errors='strict')
+        assert rc.returncode == 0
+        assert stripr(rc.stdout) == '0 line\n2 line\n'
+        assert stripr(rc.stderr) == '1 line\n'
