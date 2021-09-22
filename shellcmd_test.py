@@ -10,20 +10,23 @@ import logging
               help='count of print a log and a sleep')
 @click.option('-s', '--sleep', default=1, type=float,
               help='sleep time in one interation')
+@click.option('-o', '--last_output', default=False, type=bool,
+              help='whether to print to last message')
 @click.option('-l', '--last-sleep', default=0, type=float,
               help='last sleep time')
 @click.option('-e', '--with-stderr', default=False, type=bool,
               help='whether to print to stderr')
-def main(count, sleep, last_sleep, with_stderr):
+def main(count, sleep, last_output, last_sleep, with_stderr):
     for i in range(count):
         output = sys.stderr if with_stderr and (i % 2) else sys.stdout
         print(f"{i} line", file=output)
         sys.stdout.flush()
         sys.stderr.flush()
         time.sleep(sleep)
-    if last_sleep:
+    if last_output:
         print(f"last line", file=sys.stdout)
         sys.stdout.flush()
+    if last_sleep:
         time.sleep(last_sleep)
 
 

@@ -114,28 +114,28 @@ class TestTimeoutOnly:
 class TestTimeoutAndLogTimeout:
     def test_logtimeout_first(self):
         with pytest.raises(subprocess.LogTimeoutExpired) as ex:
-            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '1', '-l', '3'],
+            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '1', '-l', '3', '-o', 'yes'],
                             timeout=10, log_timeout=2)
         assert stripr(ex.value.stdout) == b'0 line\n1 line\n2 line\nlast line\n'
         assert stripr(ex.value.stderr) == b''
         assert ex.typename == 'LogTimeoutExpired'
 
         with pytest.raises(subprocess.LogTimeoutExpired) as ex:
-            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '2', '-l', '3'],
+            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '2', '-l', '3', '-o', 'yes'],
                             timeout=10, log_timeout=1)
         assert b'0 line\n' in stripr(ex.value.stdout)
         assert stripr(ex.value.stderr) == b''
         assert ex.typename == 'LogTimeoutExpired'
 
         with pytest.raises(subprocess.LogTimeoutExpired) as ex:
-            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '2', '-l', '3'],
+            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '2', '-l', '3', '-o', 'yes'],
                             timeout=10, log_timeout=1)
         assert b'0 line\n' in stripr(ex.value.stdout)
         assert stripr(ex.value.stderr) == b''
         assert ex.typename == 'LogTimeoutExpired'
 
         with pytest.raises(subprocess.LogTimeoutExpired) as ex:
-            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '2', '-l', '3'],
+            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '2', '-l', '3', '-o', 'yes'],
                             timeout=10, log_timeout=1, text=True,
                             encoding='utf-8', errors='strict')
         assert stripr(ex.value.stdout) == '0 line\n'
@@ -144,14 +144,14 @@ class TestTimeoutAndLogTimeout:
 
     def test_timeout_first(self):
         with pytest.raises(subprocess.TimeoutExpired) as ex:
-            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '1', '-l', '3'],
+            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '1', '-l', '3', '-o', 'yes'],
                             timeout=4, log_timeout=2)
         assert stripr(ex.value.stdout) == b'0 line\n1 line\n2 line\nlast line\n'
         assert stripr(ex.value.stderr) == b''
         assert ex.typename == 'TimeoutExpired'
 
         with pytest.raises(subprocess.TimeoutExpired) as ex:
-            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '1', '-l', '3'],
+            subprocess.run([sys.executable, shellcmd, '-c', '3', '-s', '1', '-l', '3', '-o', 'yes'],
                             timeout=1, log_timeout=3)
         assert b'0 line\n' in stripr(ex.value.stdout)
         assert stripr(ex.value.stderr) == b''
@@ -178,3 +178,21 @@ class TestWithStderr:
         assert rc.returncode == 0
         assert stripr(rc.stdout) == '0 line\n2 line\n'
         assert stripr(rc.stderr) == '1 line\n'
+
+class TestNoOutput:
+    def test_no_output_log_timeout(self):
+        with pytest.raises(subprocess.LogTimeoutExpired) as ex:
+            subprocess.run([sys.executable, shellcmd, '-c', '0', '-o', 'no', '-l', '10'],
+                            log_timeout=3)
+        assert stripr(ex.value.stdout) == b''
+        assert stripr(ex.value.stderr) == b''
+        assert ex.typename == 'LogTimeoutExpired'
+
+    def test_no_output_proc_timeout(self):
+        with pytest.raises(subprocess.TimeoutExpired) as ex:
+            subprocess.run([sys.executable, shellcmd, '-c', '0', '-o', 'no', '-l', '10'],
+                            timeout=3, capture_output=True, text=True, encoding='utf-8',
+                            errors='strict')
+        assert stripr(ex.value.stdout) == ''
+        assert stripr(ex.value.stderr) == ''
+        assert ex.typename == 'TimeoutExpired'
