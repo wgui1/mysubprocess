@@ -520,17 +520,7 @@ def run(*popenargs,
                                                  log_timeout=log_timeout)
         except (TimeoutExpired, LogTimeoutExpired) as exc:
             process.kill()
-            if _mswindows:
-                # Windows accumulates the output in a single blocking
-                # read() call run on child threads, with the timeout
-                # being done in a join() on those threads.  communicate()
-                # _after_ kill() is required to collect that and add it
-                # to the exception.
-                exc.stdout, exc.stderr = process.communicate()
-            else:
-                # POSIX _communicate already populated the output so
-                # far into the TimeoutExpired exception.
-                process.wait()
+            process.wait()
             raise
         except:  # Including KeyboardInterrupt, communicate handled that.
             process.kill()
